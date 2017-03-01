@@ -82,6 +82,8 @@ def fix_fasta_tax_entry(tax, kingdom="?"):
 
 PROTOCOL_VERSION = "1.0.3"
 USEARCH_VERSION = check_output("usearch --version", shell=True).strip()
+VSEARCH_VERSION = check_output("vsearch --version", shell=True).strip()
+# This is imperfect for vsearch...
 CLUSTALO_VERSION = check_output("clustalo --version", shell=True).strip()
 SAMPLES, OMITTED = get_samples(config.get("eid", None), config.get("minimum_reads", 1000))
 # name output folder appropriately
@@ -179,18 +181,24 @@ rule combine_filtering_stats:
 
 
 # makes default option 'vsearch'
-if config["merging"].get("algorithm", "vsearch"):
+if config["merging"].get("program", "vsearch"):
     rule merge_reads:
         input:
-        output:
-        # version: write vsearch version method
+            r1 = "results/{eid}/quality_filter/{sample}_R1.fastq",
+            r2 = "results/{eid}/quality_filter/{sample}_R2.fastq"
+        output: temp("results/{eid}/demux/{sample}_merged.fastq")
+        version: VSEARCH_VERSION
+        message: "Merging paired-end reads with VSEARCH at a minimum merge length of {params.minimum_merge_length}"
         params:
             minimum_merge_length = config["merging"].get("minimum_merge_length", 100)
         log:
             "results/{eid}/{pid}/logs/fastq_mergepairs.log".format(eid=config['eid'], pid=CLUSTER_THRESHOLD)
         shell:
             # need to ensure headers are compatible with all downstream trajectories (or limit those trajectories)
-            """vsearch command"""
+            """vsearch -fastq_mergepairs {input.r1} -reverse {input.r2} \
+            -relabel @ -sample {wildcards.sample} \
+            -fastq_minmergelen {params.minimum_merge_length} \
+            -fastqout {output} -log {log}"""
 
 else:
     rule merge_reads:
@@ -220,8 +228,15 @@ rule combine_merged_reads:
     shell: "cat {input} > {output}"
 
 
-if config[]...
-
+if config["filtering"].get("program", "vsearch"):
+    rule fastq_filter:
+        input: "results/{eid}/merged.fastq"
+        #output: "results/{eid}/merged_%s.fasta" % str(config['filtering']['maximum_expected_error'])
+        version: VSEARCH_VERSION
+        message: "Filtering FASTQ with VSEARCH with an expected maximum error rate of {params.maxee}"
+        params: maxee = config['filtering']['maximum_expected_error']
+        log: "results/{eid}/{pid}/logs/fastq_filter.log".format(eid=config['eid'], pid=CLUSTER_THRESHOLD)
+        shell: "echo Run vsearch filter"#shell: "usearch -fastq_filter {input} -fastq_maxee {params.maxee} -fastaout {output} -log {log}"
 else:
     rule fastq_filter:
         input: "results/{eid}/merged.fastq"
@@ -233,8 +248,16 @@ else:
         shell: "usearch -fastq_filter {input} -fastq_maxee {params.maxee} -fastaout {output} -log {log}"
 
 
-if config[]...
-
+if config["dereplicating"].get("program", "vsearch"):
+    rule dereplicate_sequences:
+        input: rules.fastq_filter.output
+        #output: temp("results/{eid}/uniques.fasta")
+        version: VSEARCH_VERSION
+        message: "Dereplicating with VSEARCH"
+        threads: config.get("threads", 1)
+        log: "results/{eid}/{pid}/logs/uniques.log".format(eid=config['eid'], pid=CLUSTER_THRESHOLD)
+        shell: "vsearch derep"
+		#shell: "usearch -fastx_uniques {input} -fastaout {output} -sizeout -threads {threads} -log {log}"
 else:
     rule dereplicate_sequences:
         input: rules.fastq_filter.output
@@ -246,8 +269,19 @@ else:
         shell: "usearch -fastx_uniques {input} -fastaout {output} -sizeout -threads {threads} -log {log}"
 
 
-if config[]:
-
+if config["clustering"].get("program", "vsearch"):
+    rule cluster_sequences:
+        input: "results/{eid}/uniques.fasta"
+        #output: temp("results/{eid}/{pid}/OTU_unfiltered.fasta")
+        version: VSEARCH_VERSION
+        message: "Clustering sequences with VSAERCH where OTUs have a minimum size of {params.minsize} and minimum similarity to the where the maximum difference between an OTU member sequence and the representative sequence of that OTU is {params.otu_radius_pct}%"
+        params:
+            minsize = config['clustering']['minimum_sequence_abundance'],
+            otu_radius_pct = (100 - config['clustering']['percent_of_allowable_difference']) / 100
+        #log: "results/{eid}/{pid}/logs/cluster_sequences.log"
+        shell: "vsearch test"
+        #shell: """usearch -cluster_otus {input} -minsize {params.minsize} -otus {output} -relabel OTU_ \
+        #              -otu_radius_pct {params.otu_radius_pct} -log {log}"""
 else:
     rule cluster_sequences:
         input: "results/{eid}/uniques.fasta"
