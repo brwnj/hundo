@@ -222,23 +222,15 @@ rule count_joined_reads:
     shell: "awk '{{n++}}END{{print n/4}}' {input} > {output}"
 
 # When using vsearch, reads have sample=; annotations, but not qiime compatible labels
-if config["merging"].get("program", "vsearch"):
-    rule combine_merged_reads:
-        input: expand("results/{eid}/demux/{sample}_merged.fastq", eid=config['eid'], sample=SAMPLES)
-        output: "results/{eid}/merged.fastq"
-        message: "Concatenating the merged reads into a single file"
-        shell: "cat {input} > {output}"
-else:
-    rule combine_merged_reads:
-        input: expand("results/{eid}/demux/{sample}_merged.fastq", eid=config['eid'], sample=SAMPLES)
-        output: "results/{eid}/merged.fastq"
-        message: "Concatenating the merged reads into a single file"
-        shell: "cat {input} > {output}"
+rule combine_merged_reads:
+    input: expand("results/{eid}/demux/{sample}_merged.fastq", eid=config['eid'], sample=SAMPLES)
+    output: "results/{eid}/merged.fastq"
+    message: "Concatenating the merged reads into a single file"
+    shell: "cat {input} > {output}"
 
 
 if config["filtering"].get("program", "vsearch"):
     rule fastq_filter:
-        #input: expand("results/{eid}/demux/{sample}_merged.fastq", eid=config['eid'], sample=SAMPLES) # Better??
         input: "results/{eid}/merged.fastq"
         output: "results/{eid}/merged_%s.fasta" % str(config['filtering']['maximum_expected_error'])
         version: VSEARCH_VERSION
@@ -285,8 +277,7 @@ if config["chimera_checking"]['uchime_denovo_prefilter']:
         message: "Chimera checking using UCHIME de novo as implimented in VSEARCH"
         log: "results/{eid}/{pid}/logs/uniques_uchime_denovo.log".format(eid=config['eid'], pid=CLUSTER_THRESHOLD)
         shell: """vsearch --uchime_denovo {input} \--nonchimeras {output} \
-                  --strand plus --sizein --sizeout \
-                  --log {log}"""
+                  --strand plus --sizein --sizeout --log {log}"""
 else:
     rule optional_chimera_prefilter:
         input: rules.dereplicate_sequences.output
@@ -449,16 +440,27 @@ else:
                             except KeyError:
                                 print(">%s;tax=k__?,p__?,c__?,o__?,f__?,g__?,s__?" % line[1:], file=outfile)
 
-
-rule compile_counts:
-    input:
-        fastq = rules.combine_merged_reads.output,
-        fasta = "results/{eid}/{pid}/{method}/OTU_tax.fasta"
-    output: "results/{eid}/{pid}/{method}/OTU.txt"
-    params: threshold = config['mapping_to_otus']['read_identity_requirement']
-    threads: config.get("threads", 1)
-    shell:"""usearch -usearch_global {input.fastq} -db {input.fasta} -strand plus \
-                 -id {params.threshold} -otutabout {output} -threads {threads}"""
+# Uses the same program for clustering and count table creation
+if config["clustering"].get("program", "vsearch"):
+    rule compile_counts:
+        input:
+            fastq = rules.combine_merged_reads.output,
+            fasta = "results/{eid}/{pid}/{method}/OTU_tax.fasta"
+        output: "results/{eid}/{pid}/{method}/OTU.txt"
+        params: threshold = config['mapping_to_otus']['read_identity_requirement']
+        threads: config.get("threads", 1)
+        shell:"""vsearch -usearch_global {input.fastq} -db {input.fasta} -strand plus \
+                     -id {params.threshold} -otutabout {output} -threads {threads}"""
+else:
+    rule compile_counts:
+        input:
+            fastq = rules.combine_merged_reads.output,
+            fasta = "results/{eid}/{pid}/{method}/OTU_tax.fasta"
+        output: "results/{eid}/{pid}/{method}/OTU.txt"
+        params: threshold = config['mapping_to_otus']['read_identity_requirement']
+        threads: config.get("threads", 1)
+        shell:"""usearch -usearch_global {input.fastq} -db {input.fasta} -strand plus \
+                     -id {params.threshold} -otutabout {output} -threads {threads}"""
 
 
 rule biom:
