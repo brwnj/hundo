@@ -119,7 +119,7 @@ rule make_tax_database:
     message: "Creating a UTAX database trained on {input.fasta} using {input.trained_parameters}"
     shell: "usearch -makeudb_utax {input.fasta} -taxconfsin {input.trained_parameters} -output {output}"
 
-
+# Only for usearch
 rule make_uchime_database:
     input: config['chimera_database']['fasta']
     output: os.path.splitext(config['chimera_database']['fasta'])[0] + '.udb'
@@ -195,11 +195,12 @@ if config["merging"].get("program", "vsearch"):
             "results/{eid}/{pid}/logs/fastq_mergepairs.log".format(eid=config['eid'], pid=CLUSTER_THRESHOLD)
         shell:
             # need to ensure headers are compatible with all downstream trajectories (or limit those trajectories)
+            # This will add the usearch samples annotation.
+            #            -label_suffix \;sample={wildcards.sample}\; \
             """vsearch -fastq_mergepairs {input.r1} -reverse {input.r2} \
-            -relabel @ -sample {wildcards.sample} \
+            -label_suffix \;sample={wildcards.sample}\; \
             -fastq_minmergelen {params.minimum_merge_length} \
             -fastqout {output} -log {log}"""
-
 else:
     rule merge_reads:
         input:
@@ -220,23 +221,32 @@ rule count_joined_reads:
     output: "results/{eid}/logs/{sample}_merged.fastq.count"
     shell: "awk '{{n++}}END{{print n/4}}' {input} > {output}"
 
-
-rule combine_merged_reads:
-    input: expand("results/{eid}/demux/{sample}_merged.fastq", eid=config['eid'], sample=SAMPLES)
-    output: "results/{eid}/merged.fastq"
-    message: "Concatenating the merged reads into a single file"
-    shell: "cat {input} > {output}"
+# When using vsearch, reads have sample=; annotations, but not qiime compatible labels
+if config["merging"].get("program", "vsearch"):
+    rule combine_merged_reads:
+        input: expand("results/{eid}/demux/{sample}_merged.fastq", eid=config['eid'], sample=SAMPLES)
+        output: "results/{eid}/merged.fastq"
+        message: "Concatenating the merged reads into a single file"
+        shell: "cat {input} > {output}"
+else:
+    rule combine_merged_reads:
+        input: expand("results/{eid}/demux/{sample}_merged.fastq", eid=config['eid'], sample=SAMPLES)
+        output: "results/{eid}/merged.fastq"
+        message: "Concatenating the merged reads into a single file"
+        shell: "cat {input} > {output}"
 
 
 if config["filtering"].get("program", "vsearch"):
     rule fastq_filter:
+        #input: expand("results/{eid}/demux/{sample}_merged.fastq", eid=config['eid'], sample=SAMPLES) # Better??
         input: "results/{eid}/merged.fastq"
-        #output: "results/{eid}/merged_%s.fasta" % str(config['filtering']['maximum_expected_error'])
+        output: "results/{eid}/merged_%s.fasta" % str(config['filtering']['maximum_expected_error'])
         version: VSEARCH_VERSION
         message: "Filtering FASTQ with VSEARCH with an expected maximum error rate of {params.maxee}"
         params: maxee = config['filtering']['maximum_expected_error']
         log: "results/{eid}/{pid}/logs/fastq_filter.log".format(eid=config['eid'], pid=CLUSTER_THRESHOLD)
-        shell: "echo Run vsearch filter"#shell: "usearch -fastq_filter {input} -fastq_maxee {params.maxee} -fastaout {output} -log {log}"
+        shell: """vsearch -fastq_filter {input} -fastaout {output} \
+                          -fastq_maxee {params.maxee} -log {log}"""
 else:
     rule fastq_filter:
         input: "results/{eid}/merged.fastq"
@@ -247,17 +257,16 @@ else:
         log: "results/{eid}/{pid}/logs/fastq_filter.log".format(eid=config['eid'], pid=CLUSTER_THRESHOLD)
         shell: "usearch -fastq_filter {input} -fastq_maxee {params.maxee} -fastaout {output} -log {log}"
 
-
 if config["dereplicating"].get("program", "vsearch"):
     rule dereplicate_sequences:
         input: rules.fastq_filter.output
-        #output: temp("results/{eid}/uniques.fasta")
+        output: temp("results/{eid}/uniques.fasta")
         version: VSEARCH_VERSION
         message: "Dereplicating with VSEARCH"
         threads: config.get("threads", 1)
         log: "results/{eid}/{pid}/logs/uniques.log".format(eid=config['eid'], pid=CLUSTER_THRESHOLD)
-        shell: "vsearch derep"
-		#shell: "usearch -fastx_uniques {input} -fastaout {output} -sizeout -threads {threads} -log {log}"
+        shell: """vsearch --derep_fulllength {input} --output {output} \
+                  --sizeout --threads {threads} -log {log}"""
 else:
     rule dereplicate_sequences:
         input: rules.fastq_filter.output
@@ -268,23 +277,40 @@ else:
         log: "results/{eid}/{pid}/logs/uniques.log".format(eid=config['eid'], pid=CLUSTER_THRESHOLD)
         shell: "usearch -fastx_uniques {input} -fastaout {output} -sizeout -threads {threads} -log {log}"
 
+if config["chimera_checking"]['uchime_denovo_prefilter']:
+    rule optional_chimera_prefilter:
+        input: rules.dereplicate_sequences.output
+        output: temp("results/{eid}/uniques_uchime_denovo.fasta")
+        version: VSEARCH_VERSION
+        message: "Chimera checking using UCHIME de novo as implimented in VSEARCH"
+        log: "results/{eid}/{pid}/logs/uniques_uchime_denovo.log".format(eid=config['eid'], pid=CLUSTER_THRESHOLD)
+        shell: """vsearch --uchime_denovo {input} \--nonchimeras {output} \
+                  --strand plus --sizein --sizeout \
+                  --log {log}"""
+else:
+    rule optional_chimera_prefilter:
+        input: rules.dereplicate_sequences.output
+        output: rules.dereplicate_sequences.output
+        message: "Skip chimera checking with UCHIME de novo"
+        shell: "cp {input} {output}"
+
 
 if config["clustering"].get("program", "vsearch"):
     rule cluster_sequences:
-        input: "results/{eid}/uniques.fasta"
-        #output: temp("results/{eid}/{pid}/OTU_unfiltered.fasta")
+        input: rules.optional_chimera_prefilter.output
+        output: temp("results/{eid}/{pid}/OTU_unfiltered.fasta")
         version: VSEARCH_VERSION
-        message: "Clustering sequences with VSAERCH where OTUs have a minimum size of {params.minsize} and minimum similarity to the where the maximum difference between an OTU member sequence and the representative sequence of that OTU is {params.otu_radius_pct}%"
+        message: "Clustering sequences with VSAERCH where OTUs have a minimum size of {params.minsize} and where the maximum difference between an OTU member sequence and the representative sequence of that OTU is {params.otu_id_pct}%"
         params:
             minsize = config['clustering']['minimum_sequence_abundance'],
-            otu_radius_pct = (100 - config['clustering']['percent_of_allowable_difference']) / 100
-        #log: "results/{eid}/{pid}/logs/cluster_sequences.log"
-        shell: "vsearch test"
-        #shell: """usearch -cluster_otus {input} -minsize {params.minsize} -otus {output} -relabel OTU_ \
-        #              -otu_radius_pct {params.otu_radius_pct} -log {log}"""
+            otu_id_pct = config['clustering']['vsearch_id']
+        log: "results/{eid}/{pid}/logs/cluster_sequences.log"
+        shell: """vsearch -cluster_size {input} -centroids {output} \
+                  -minsize {params.minsize} -relabel OTU_ \
+                  -id {params.otu_id_pct} -log {log}"""
 else:
     rule cluster_sequences:
-        input: "results/{eid}/uniques.fasta"
+        input: rules.optional_chimera_prefilter.output
         output: temp("results/{eid}/{pid}/OTU_unfiltered.fasta")
         version: USEARCH_VERSION
         message: "Clustering sequences with USEARCH where OTUs have a minimum size of {params.minsize} and where the maximum difference between an OTU member sequence and the representative sequence of that OTU is {params.otu_radius_pct}%"
